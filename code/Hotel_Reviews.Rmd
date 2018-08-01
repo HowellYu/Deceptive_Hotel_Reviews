@@ -1,0 +1,374 @@
+---
+title: "Detecting Deceptive Hotel Reviews using Machine Learning"
+author: "Ashok Khosla"
+date: "7/28/2018"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Project background:
+
+This study project is a repeat of work performed at Cornell University by  Myle Ott, Yejin Choi, Claire Cardie and Jeffrey T. Hancock. Their paper [Finding Deceptive Opinion Spam by Any Stretch of the Imagination](http://delivery.acm.org/10.1145/2010000/2002512/p309-ott.pdf?ip=184.63.251.195&id=2002512&acc=OPEN&key=4D4702B0C3E38B35%2E4D4702B0C3E38B35%2E4D4702B0C3E38B35%2E6D218144511F3437&__acm__=1533008290_8a3017dba7cd7e36daf01d137f2ea0da) details their methodology. 
+
+They collected, as a result of their methodology, 1600 reviews, of which 800 were deceptive, and 800 were truthful (i.e. written by an actual hotel guest). The deceptive reviews were created under contract with human workers, who were given a minute to write the review, had to live in the US, etc. 400 of each set of reviews were positive, and 400 were negative, leading to the dataset being examined:
+
+- 400 truthful, positive reviews from TripAdvisor
+- 400 deceptive positive reviews from Mechanical Turk
+- 400 truthful, negative reviews from Expedia, Hotels.com, Orbitz, Priceline, TripAdvisor, and Yelp
+- 400 deceptive negative reviews from Mechanical Turk
+
+This project will use a Support Vector Machine (an SVM) which is a fancy way of saying this project will calculate a place in the data where it can cleave spam from non-spam. In mathematical terms, we will calculate a hyperplane through a hyperspace defined by dimensions such as word counts, and parts-of-speech counts (nouns, adjective, etc.)
+
+The project is written in one of my favorite programming languages, the statistical software language known as R. If you want to follow along, click on the code button to see the software in action.
+
+## Exploratory Data Analysis:
+
+The first part of every data science project is to read in the data and "explore" it, preferably using graphics to gain insight.
+
+#### Initialize and load libraries
+```{r Initialize, message=FALSE}
+
+################################################################################
+### Initialize environment
+################################################################################
+rm(list=ls())
+library(tidyverse)
+library(gridExtra) #viewing multiple plots together
+
+ # Text Mining Packages
+library(tidytext)
+library(tokenizers)
+library(wordcloud2) #creative visualizations
+library(spacyr)
+spacy_initialize()
+
+# Graphics Packages
+library(ggthemes)
+library(moments)
+library(ggplot2)
+library(scales)
+library(knitr) # for dynamic reporting
+library(kableExtra) # create a nicely formated HTML table
+library(formattable) # for the color_tile function
+
+publication_theme <- function() {
+    theme_economist() +
+    theme(text=element_text(family="Rockwell"),
+          plot.title = element_text(family="Rockwell", size=12)
+    )
+}
+
+Project_Dir <- "/Users/amkhosla/Desktop/Statistics/Projects/Hotel_Reviews/code"
+setwd(Project_Dir)
+```
+#### Read and label the hotel reviews
+Once all the programming libraries and environment have been loaded, we need to read in the reviews (one per file) and label them as truthful or deceptive. Here's a look at 4 sample reviews - for each category - from the resulting database of 1600 reviews.
+
+```{r Load_Reviews }
+
+training_path = '../input/op_spam_train/'
+training_files <- list.files(path=training_path, pattern="*.txt", full.names=TRUE, recursive=TRUE)
+if (length(training_files) != 1600) { 
+   stop (paste("Couldn't locate input training files at:",  
+                print(getwd()), print(training_path)))
+}
+training.df <- as.tibble(as.data.frame(training_files, 
+                                       col.names = c("Training_File"),
+                                       stringsAsFactors = FALSE))
+```
+
+
+```{r label_spam_files, echo=F,results='asis',error=F,warning=F}
+### Figure out labels for the files, and read in the reviews...
+# Based on file folder name (starts with truth or deceptive), label file as spam/not spam
+
+# Label file as spam or not
+Truthfulness <- list()
+Truthfulness <- sapply(1:length(training_files), function(anIndex) Truthfulness[anIndex] <- "truth")
+Truthfulness[grep("/deceptive", training_files, value = FALSE)] <- "deceptive"
+training.df$Truthfulness <- Truthfulness
+
+# Label file as positive or not
+Likes <- list()
+Likes <- sapply(1:length(training_files), function(anIndex) Likes[anIndex] <- "positive")
+Likes[grep("/negative_polarity", training_files, value = FALSE)] <- "negative"
+training.df$Likes <- Likes
+
+# Read files into data frame
+training.df$Hotel_Reviews <- sapply(training_files, read_file)
+# Show label and review
+kable(head(training.df[c(1,401,801,1599),2:4]), format = "markdown")
+```
+<br/><br/>
+Now comes the first analysis of the text. The first thing to examine in any textual analysis is the so called bag-of-words model. We break up the reviews into a set of words, and then we analyze those single words.
+
+```{r Tokenize_reviews}
+###
+# FIX CONTRACTIONS like won't can't, etc.
+# function to expand contractions in an English-language source
+fix.contractions <- function(doc) {
+    # "won't" is a special case as it does not expand to "wo not"
+    doc <- gsub("won't", "will not", doc)
+    doc <- gsub("can't", "can not", doc)
+    doc <- gsub("n't", " not", doc)
+    doc <- gsub("'ll", " will", doc)
+    doc <- gsub("'re", " are", doc)
+    doc <- gsub("'ve", " have", doc)
+    doc <- gsub("'m", " am", doc)
+    doc <- gsub("'d", " would", doc)
+    # 's could be 'is' or could be possessive: it has no expansion
+    doc <- gsub("'s", "", doc)
+    return(doc)
+}
+
+cleanup_review <- function(aReviewStr) {
+    the_cleansed_string <- aReviewStr
+    the_cleansed_string <- fix.contractions(the_cleansed_string)
+    the_cleansed_string <- gsub("[^a-zA-Z0-9 ]", " ", the_cleansed_string)
+    theTokens <- tokenize_words(the_cleansed_string, stopwords = stopwords::stopwords("en"))[[1]]
+    theLongerTokens  <- theTokens[sapply(theTokens, function(aToken) (nchar(aToken) > 3))]
+    the_cleansed_string <- paste(theLongerTokens, collapse = " ")
+    return(the_cleansed_string)
+}
+training.df$Filtered_Reviews <- sapply(training.df$Hotel_Reviews, cleanup_review)
+
+tokenized_unigram.df <- training.df %>% 
+    unnest_tokens(word, Filtered_Reviews) %>%
+    distinct() 
+
+tokenized_bigram.df <- training.df %>% 
+    unnest_tokens(ngram, Filtered_Reviews, token = "ngrams", n = 2, collapse=FALSE) # %>%
+```
+
+### Preliminary distributions
+Zipf's law says that the more common a word is the shorter it is. It also says that the frequency of that word has a "Zipfian" distribution - common words (typically the top 2000-3000 words in any language) have a very high occurence/probability, and then the rest rapidly drop off. As a quick sanity check of the data, let's see if the reviews have a "Zipfian" distribution.
+
+```{r Word_Frequencies}
+word_frequency <- tokenized_unigram.df %>%
+    dplyr::count(word, sort = TRUE) 
+freq_range = 1:1000
+barplot(word_frequency$n[freq_range])
+```
+Looks Zipfian!
+
+## Sentiment analysis
+The first 800 reviews are "negative polarity", meaning they dislike the hotel, and then the next 800 are "positive polarity" meaning they like the hotel. We can perform a "sentiment" analysis (determining whether a writer's attitude is positive, negative, or neutral) on the reviews to see if the data seems reasonably labeled for thumbs-up/down polarity. Here we use the "bing" sentiment dictionary to categorize words as harsh or kind.
+
+```{r Sentiment analysis}
+reviewssentiment <- tokenized_unigram.df %>%
+    inner_join(get_sentiments("bing"), by = "word")  %>%
+    count(training_files, sentiment) %>%
+    spread(sentiment, n, fill = 0) %>%
+    mutate(sentiment = positive - negative)
+
+negative_sentiment_average <- mean(reviewssentiment$sentiment[1:799])
+positive_sentiment_average <- mean(reviewssentiment$sentiment[801:1599])
+ggplot(data=reviewssentiment[1:799,], aes(reviewssentiment$sentiment[1:799])) + 
+        geom_histogram(binwidth = 1) +
+        xlab("Sentiment Level") +
+        labs(title = "Sentiment for Negative Reviews") +
+        publication_theme()
+ggplot(data=reviewssentiment[801:1599,], aes(reviewssentiment$sentiment[801:1599])) + 
+        geom_histogram(binwidth = 1) +
+        xlab("Sentiment Level") +
+        labs(title = "Sentiment for Positive Reviews") +
+        publication_theme()
+
+```
+
+Negative reviews have an average sentiment level of `r format(negative_sentiment_average, digits=3)`, positive ones an average of `r format(positive_sentiment_average, digits=3)`, so it seems likely the data has been correctly labeled as positive or negative "thumbs-up". Even when they are being negative, people tend to be kinder than harsher. Good. 😁	
+
+### Deceptive words vs truthful words
+
+Let's plot the probability that words show up in reviews, by whether they show up in truthful, or deceptive reviews, or both.
+
+#### Words that show up ONLY in deceptive reviews or ONLY in truthful reviews
+```{r Show_Only_Deceptive_Words, fig.height = 28, fig.width = 11}
+
+word_distribution <- as.tibble(count(tokenized_unigram.df, word, Truthfulness, sort = TRUE))
+tidy_word_distribution <- spread(word_distribution, Truthfulness, n) 
+tidy_word_distribution <- tidy_word_distribution %>% 
+    replace_na(list(deceptive = 0, truth = 0)) %>% 
+    mutate(deceptive_proportion = deceptive / sum(deceptive))  %>%
+    mutate(truth_proportion = truth / sum(truth))
+
+deceptive_words_only <- tidy_word_distribution %>%
+    filter(truth_proportion == 0) %>%
+    filter(deceptive > 2) %>%
+    mutate(word = reorder(word, deceptive))   #Reorders word into a factor, based on n....
+deceptive.barplot <- ggplot(deceptive_words_only, aes(word, deceptive)) +
+        geom_col() +
+        xlab(NULL) +
+        coord_flip() +
+        labs(title = "Words that appear ONLY in deceptive reviews") +
+        theme_economist() +
+        theme(text=element_text(family="Rockwell"),
+                plot.title = element_text(family="Rockwell", size=12),
+                axis.text.x = element_text(size=rel(1)),
+                axis.text.y = element_text(size=rel(1)))
+deceptive.barplot
+```
+
+
+```{r Show_Only_True_Words, fig.height = 44, fig.width = 11}
+true_words_only <- tidy_word_distribution %>%
+    filter(deceptive_proportion == 0) %>%
+    filter(truth > 2) %>%
+    mutate(word = reorder(word, truth)) #Reorders word into a factor, based on n....
+true.barplot <- ggplot(true_words_only, aes(word, truth)) +
+        geom_col() +
+        xlab(NULL) +
+        coord_flip() +
+        labs(title = "Words that appear ONLY in  truthful reviews") +
+        publication_theme()
+true.barplot
+```
+
+There are words that only show up in deceptive reviews, and similarly there are words that only show up in truthful reviews: As you can observe, the deceptive reviews are slightly richer on superlative words, and the truthful reviews seem richer on nouns. This implies that parts-of-speech tagging might be a useful part of our approach.
+
+#### Words that show up in BOTH truthful and deceptive reviews
+
+How about words that show up in both truthful and deceptive reviews?. Looks like the same thing, nouns show up in the top left truthful section, adjectives in the bottom right deceptive section. Looks like people who write deceptive reviews like the words luxury, accomodations, amazing and smell.
+<br/><br/>
+Deceptive reviews smell bad! And they are "amazing". LOL 😂 
+
+```{r Plot_Deceptive_VS_Truth, warning=FALSE, fig.height = 22, fig.width = 11, fig.align = "center"}
+# Remove words that occur only on axes from the plot
+plot_word_distribution <- tidy_word_distribution %>%
+    filter((truth_proportion > 0) & (deceptive_proportion > 0))
+
+spam.plot <- ggplot(plot_word_distribution, 
+       aes(x = deceptive_proportion, y = truth_proportion )) +
+    geom_abline(color = "gray40", lty = 2) +
+    geom_jitter(color = "red", alpha = 0.3, size = 2., width = 0.2, height = 0.2) +
+    geom_text(aes(label = word), check_overlap = TRUE, size = 3, fontface = "bold", vjust = 1.5) +
+    scale_x_log10(labels = percent_format()) +
+    scale_y_log10(labels = percent_format()) +
+    # xlim(-0.001, 0.002) + ylim(-0.001, 0.002) +
+    theme(legend.position="none") +
+    labs(y = "% Truthful (log scale)", x = "% Deceptive (log scale)") +
+    publication_theme()
+spam.plot
+```
+
+Now would be a good time to quote the authors of the original study:
+
+> *However, that deceptive opinions contain more superlatives is not unexpected,*
+> *since deceptive writing (but not necessarily imaginative writing in general)*
+> *often contains exaggerated language.*
+
+With some insight into the distribution and type of words used in spam review, let's build a machine learning algorithm. The original authors got a 90% accuracy match with their SVM. Again a quote is in order:
+
+> *Notably, a combined classifier with both n-gram and psychological deception features*
+> *achieves nearly 90% cross-validated accuracy on this task.*
+> *In contrast, we find deceptive opinion spam detection to be well beyond the capabilities*
+> *of most human judges, who perform roughly at-chance—a finding that is consistent*
+> *with decades of traditional deception detection research* (Bond and DePaulo, 2006).
+
+So... astonishingly, human intelligence has a roughly 50% accuracy at detecting deception (no better than random). This explains much to me.
+<br/><br/>
+Lets see if machine-learning can do better 😉
+
+## Feature Engineering
+
+We will need to extract more information from the words we have at our disposal. The authors of the study created two sets of parameters for their machine-learning "hyperspace" - one is the parts-of-speech tagging for a review (adjectives, nouns, etc.). 
+
+You might be surprised to learn that identifying a word's part of speech is a fairly classic AI technology, and even very simple approaches routinely get 90% accuracy. The other thing the author's discovered is using bigrams/n-grams instead of single words. This means they looked at paired words. For example the previous sentence, instead of being broken down into {this, means, they, looked, at, paired, words} breaks down into two word combinations. {this means, means they, they looked, looked at, at paired, paired words}
+
+Let's perform these bits of "feature engineering" - creating additional features from the text to improve our machine learning success. First lets tag the words with their parts-of-speech.
+
+#### Testing spacyr - an open-source Parts-of_Speech (POS) tagger
+Several open-source parts-of-speech (POS) taggers are available. I'm using [spacyr](https://github.com/quanteda/spacyr). Trained using a neural net, this POS tagger has a 92% accuracy, and is a (relatively) fast classifier - important considering the amount of data we are mining. As an example of its use, let's parse a joke:<br/><br/>
+*A Texan, a Russian and a New Yorker go to a restaurant in London.*<br/>
+*The waiter tells them, "Excuse me -- if you were going to order the steak, I'm afraid there's a shortage due to the mad cow disease."*<br/><br/>
+*The Texan says, "What's a shortage?"*<br/>
+*The Russian says, "What's a steak?"*<br/>
+*The New Yorker says, "What's 'excuse me'?"*<br/>
+
+```{r Test_Spacy, message=TRUE}
+txt <- c(line1 = "A Texan, a Russian and a New Yorker go to a restaurant in London.",
+         line2 = "The waiter tells them, Excuse me -- if you were going to order the steak, I'm afraid there's a shortage due to the mad cow disease.",
+         line3 = "The Texan says, What's a shortage?",
+         line4 = "The Russian says, What's a steak?",
+         line4 = "The New Yorker says, What's 'excuse me?")
+
+# process documents and obtain a data.table
+parsedtxt <- spacy_parse(txt)
+parsedtxt$sentence_id <- NULL
+# Show label and review
+kable(parsedtxt[1:20,], format = "markdown")
+
+```
+
+#### Tagging the hotel reviews
+
+We'll first tag the reviews
+And then clean them up by removing information-free words like I, me, the, etc.
+```{r POS_Tagging, eval=TRUE, cache=TRUE, message=FALSE}
+# Create a list of docId, review (spacyr's input format for text)
+text_data <- c()
+text_data[training.df$training_files] <- training.df$Hotel_Reviews
+reviews.pos.raw <- spacy_parse(text_data)
+
+# Standardize format
+names(reviews.pos.raw)[names(reviews.pos.raw)=="token"] <- "word"
+names(reviews.pos.raw)[names(reviews.pos.raw)=="doc_id"] <- "training_files"
+reviews.pos.raw$token_id <- NULL
+
+# Remove all tokens less than 3 characters and remove stop words
+reviews.pos <- reviews.pos.raw %>%
+    filter(nchar(word) > 3) %>%
+	filter(pos!="PART") %>%
+    anti_join(stop_words)
+
+reviews.df <- inner_join(training.df, reviews.pos, by="training_files")
+reviews.df$Hotel_Reviews <- NULL
+reviews.df$Filtered_Reviews <- NULL
+```
+```{r POS_Tagging_Show}
+kable(head(reviews.df[,2:8]), format = "markdown")
+```
+
+#### Confirming our parts of speech hypothesis
+
+Now let's confirm our parts of speech hypothesis
+Let's look at the parts of speech distribution for both truthful and deceptive reviews
+```{r Confirm_Deceptive_POS_Hypothesis}
+reviews.pos.count <- reviews.df %>%
+						group_by(Truthfulness) %>%
+						dplyr::count(pos,sort=TRUE)
+
+kable(reviews.pos.count[order(reviews.pos.count$pos, reviews.pos.count$Truthfulness),], 
+	  format = "markdown")
+```
+
+Hmmn... Compared to deceptive reviews, truthful reviews have:
+
+- Significantly more nouns
+- Significantly less adverbial particles (nearby, while, after, before, etc.)
+- Significantly more numbers
+- Somewhat less proper names
+
+```{r Graph_POS_Hypothesis}
+pos.barplot <- ggplot(reviews.pos.count, aes(pos,n, fill=Truthfulness)) +
+        geom_col(position="dodge") +
+        coord_flip() +
+        xlab("Number of times POS appears") +
+        labs(title = "Truthful and Deceptive Reviews - Parts-of-speech Distribution") +
+        theme_economist() +
+        theme(text=element_text(family="Rockwell"), 
+		      plot.title = element_text(family="Rockwell", size=12))
+pos.barplot
+
+```
+
+## Next Steps:
+
+This will end the Exploratory Analysis part of this project.
+Coming Up is the Machine Learning phase
+
+    
