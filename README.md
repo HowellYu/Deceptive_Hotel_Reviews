@@ -1,6 +1,6 @@
 # Deceptive_Hotel_Reviews
 This study project is a repeat of work performed at Cornell University by Myle Ott, Yejin Choi, Claire Cardie and Jeffrey T. Hancock. 
-Their paper <a href=" http://myleott.com/op_spamACL2011.pdf">Finding Deceptive Opinion Spam by Any Stretch of the Imagination</a> details their methodology.
+Their paper <a href="http://myleott.com/op_spamACL2011.pdf">Finding Deceptive Opinion Spam by Any Stretch of the Imagination</a> details their methodology.
 
 They collected, as a result of their methodology, 1600 reviews, of which 800 were deceptive, and 800 were truthful (i.e. written by an actual hotel guest). The deceptive reviews were created under contract with human workers, who were given a minute to write the review, had to live in the US, etc. 400 of each set of reviews were positive, and 400 were negative, leading to the dataset being examined:
 
